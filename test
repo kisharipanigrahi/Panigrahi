@@ -1,1 +1,812 @@
-Hi this is first test file fotr test purpose 
+a301-4993-3988:/home/iapproc/load_process/Deb/Deb_new> cat /home/iapproc2/load_process/batch_files/IAP_FTP_FILE_TO_DROPBOX.sh
+#!/bin/ksh
+###################################################################################################
+# IAP_FTP_FILE_TO_DROPBOX.sh
+# This script sends Vestmark Outbound File to Dropbox.
+# 1.Cleanup files from Dropbox
+# 2.Trnasfer Vestmark Outbound File to Dropbox.
+# Initial 12/22/2014 Version 1
+##################################################################################################
+. /home/iapproc2/.profile
+. /home/iapproc2/load_process/batch_files/.IAPETLVariables
+. /home/iapproc2/load_process/batch_files/IAP_DEFINE_FUNCTIONS.sh
+
+# Assign local vars
+ts=`date '+%Y%m%d%H%M%S'`
+dt=`date '+%Y%m%d'`
+rc=0
+
+# Output log file
+file_nm=`basename $0`
+log_file_name=${LOGS_DIR}/$file_nm.$1.log$ts
+exec > $log_file_name
+exec 2>&1
+echo ""
+echo "***************************************************************************"
+echo "************************  START OF THE PROCESS  ***************************"
+echo "***************************************************************************"
+echo ""
+echo "---------------------------------------------------------------------------"
+echo "JOB:         "$file_nm
+echo "Date Run:    "`date`
+echo "Server Name: "$host_nm
+echo "---------------------------------------------------------------------------"
+echo ""
+
+# Archive old log(s)
+find ${LOGS_DIR} -name $file_nm.$1.log\* -mtime +${log_arch_days} -exec mv {} ${LOGS_HIST_DIR} \;
+if [[ $? -gt 0 ]]
+then
+    echo ""
+    echo "[ERROR]: Archive Log File: error found."
+    echo ""
+fi
+
+# Purge old log(s)
+find ${LOGS_HIST_DIR} -name $file_nm.$1.log\* -mtime +${log_purg_days} -exec rm {} \;
+if [[ $? -gt 0 ]]
+then
+    echo ""
+    echo "[ERROR]: Purge Log File: error found."
+    echo ""
+fi
+
+#Parameter Checking
+
+if [[ $# -lt 1 ]]
+then
+    echo ""
+    echo "[ERROR]: Two Parameter Should be Passed to Script !!!"
+    echo ""
+    failure_notification
+elif [[ $# -eq 2 && ${1} == "SWP_ACCT_DETAIL.DAT" ]]
+then
+ FTP_HOST_FROM_DIR=${TGT_FILES_DIR}
+ FTP_HOST_TO_DIR="${IAP_REBAL_DIR}"
+elif [[ $# -eq 2  ]]
+then
+ FTP_HOST_FROM_DIR=${TGT_FILES_DIR}
+ FTP_HOST_TO_DIR="${IAP_DROPBOX_DIR}/${2}"
+elif [[ $# -eq 3 && ${3} == "GIM" ]]
+then
+    FTP_HOST_FROM_DIR=${TGT_FILES_DIR}
+    FTP_HOST_TO_DIR="${IAP_ROOT_DROPBOX_DIR}${2}"
+elif [[ $# -eq 3 && ${3} == "GAM" ]]
+then
+    FTP_HOST_FROM_DIR=${TGT_FILES_GAM_DIR}
+    FTP_HOST_TO_DIR="${IAP_DROPBOX_GAM_DIR}/${2}"
+elif [[ $# -eq 3 && ${3} == "VESTMARK" ]]
+then
+    FTP_HOST_FROM_DIR=${TGT_FILES_GAM_DIR}
+    FTP_HOST_TO_DIR="${IAP_DROPBOX_DIR}/${2}"
+elif [[ $# -eq 3 && ${3} == "GAM_Read" ]]
+then
+    FTP_HOST_FROM_DIR=${TGT_FILES_DIR}
+    FTP_HOST_TO_DIR="${IAP_DROPBOX_GAM_DIR}"
+elif [[ $# -eq 3 && ${3} == "IN" ]]
+then
+     FTP_HOST_FROM_DIR=${TGT_FILES_DIR}
+     FTP_HOST_TO_DIR="${IAP_SRC_DROPBOX_DIR}${IAP_DROPBOX_VM_EXTRACT}/${2}"
+ elif [[ $# -eq 4 ]]
+then
+ FTP_HOST_FROM_DIR=${TGT_FILES_DIR}
+ FTP_HOST_TO_DIR="${IAP_DROPBOX_GAM_DIR}/${2}"
+fi
+
+#Crete date file
+
+if [[ -f ${TEMP_DIR}/DATEFILE.OUT ]]
+then
+    BUSINESS_D=`cat ${TEMP_DIR}/DATEFILE.OUT | awk '{ print $1 }'| tr -d '-'`
+    echo ""
+    echo "[INFO]: Business date is : ${BUSINESS_D}"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: Datefile is absent !!! "
+    echo ""
+    failure_notification
+fi
+
+###########Business date for E99 #####
+
+BUSINESS_D_E99=`sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL
+SET HEAD OFF;
+SELECT TO_CHAR(TRADE_DATE_PLUS_1,'YYYYMMDD') FROM ${TABLE_SCHEMA}.STG_IAP_DATEFILE;
+EXIT sql.sqlcode ;
+ENDOFSQL`
+echo ${BUSINESS_D_E99}
+BUSINESS_D_E99_1=`echo ${BUSINESS_D_E99}|tr -d ' '`
+BUSINESS_DT_E99=$BUSINESS_D_E99_1
+
+
+# set variables
+
+if [[ $# -eq 2 && ${2} == "QA" ]]
+then
+ FTP_HOST="xashedw01qap.ash.pwj.com"
+ USER="btchproc"
+ FLG="N"
+elif [[ $# -eq 2 && ${2} == "PRD" ]]
+then
+ FTP_HOST="edwapprod01.dsm.pwj.com"
+ USER="btchproc"
+ FLG="N"
+elif [[ $# -eq 2 && ${2} == "DR" ]]
+then
+ FTP_HOST="edwapprod02.dsm.pwj.com"
+ USER="btchproc"
+ FLG="N"
+elif [[ $# -eq 3 && ${3} == "GAM_Read" ]]
+then
+ FTP_HOST="secure-qaxfer-int.dsm.pwj.com"
+ USER="GAM_Read"
+ #FTP_HOST="148.112.110.11"
+# USER="-oport=1024 GAM_Read"
+ FLG="Y"
+else
+ FTP_HOST="secure-qaxfer-int.dsm.pwj.com"
+ USER="vestmark2"
+ #FTP_HOST="148.112.110.11"
+ #USER="-oport=1024 vestmark2"
+ FLG="Y"
+fi
+
+
+FILE_NM=$1
+
+#if else conditioncode is to handle capital and realize gain files
+FILE_EXT=`echo $1 | awk -F "." ' { print $2 }'`
+
+if [[ ${FILE_EXT} == "dat" || ${FILE_EXT} == "DAT" ]]
+then
+    VM_FILE_NM=${FILE_NM}
+elif [[ ${FILE_EXT} == "zip" ]]
+then
+    f_nm=`echo $1 | awk -F "." ' {print $1}'`
+    VM_FILE_NM=${f_nm}_${BUSINESS_D}.zip
+elif [[ ${1} ==  "UBSWMA*E99" ]]
+then
+        VM_FILE_NM=${FILE_NM}_${BUSINESS_DT_E99}.txt
+elif [[ ${1} ==  "UBSWMA_SecurityRatingLists" ]]
+then
+        VM_FILE_NM=${FILE_NM}_${BUSINESS_D}.csv
+elif [[ ${1} ==  "UBSWMA_UserEntitlementReport" ]]
+then
+        VM_FILE_NM=${FILE_NM}_${BUSINESS_D}.csv
+elif [[ ${1} ==  "SODOTI" ]]
+then
+        VM_FILE_NM=${FILE_NM}_${BUSINESS_D}.csv
+
+else
+    VM_FILE_NM=${FILE_NM}_${BUSINESS_D}.txt
+fi
+
+V_FILE_NM=$1
+
+echo {VM_FILE_NM}
+
+#Checking if ftp host is a valid host
+
+ping -w 1 ${FTP_HOST}
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully ping ${FTP_HOST} host"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: ${FTP_HOST} Unknown Host!! "
+    echo ""
+    failure_notification
+fi
+
+#CLEANUP (Remove Vestmark files from Dropbox) operation
+sftp ${USER}@${FTP_HOST}<<EOF
+cd ${FTP_HOST_TO_DIR}
+rm ${V_FILE_NM}*
+EOF
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully Remove ${FILE_NM} from dropbox"
+    echo ""
+else
+    echo ""
+    echo "[INFO]: ${FILE_NM} File not Remove from dropbox !!! "
+    echo ""
+fi
+
+#############Dashboard Logic For Inbound Processed Feeds#############
+FLAG=N
+FILE_PATTERN=DUMMY
+
+case ${1} in
+Trade_Authorization_File)
+FILE_PATTERN=UBSWMA_Sleeves
+FLAG=Y
+    ;;
+UBSWMA_IN_Trans_*_File)
+FILE_PATTERN=UBSWMA_Transactions
+FLAG=Y
+ ;;
+UBSWMA_Bkng_Slv_Pos)
+FILE_PATTERN=wkf_IAP_IN_BOUND_POSITION
+FLAG=Y
+ ;;
+UBSWMA_Bkng_Acct_Slv)
+FILE_PATTERN=wkf_IAP_IN_BOUND_POSITION
+FLAG=Y
+ ;;
+UBSWMA_Bkng_Acct_Cash_Bal)
+FILE_PATTERN=wkf_IAP_IN_BOUND_POSITION
+FLAG=Y
+ ;;
+UBSWMA_SWP_Holdings)
+FILE_PATTERN=wkf_IAP_IN_BOUND_POSITION
+FLAG=Y
+ ;;
+UBSWMA_IN_Positions)
+FILE_PATTERN=UBSWMA_TaxLots
+FLAG=Y
+ ;;
+*)
+    echo ""
+    echo "[INFO]: File does not come under inbound processed feed"
+    echo ""
+        ;;
+esac
+
+#############dashboard###################
+v1=`echo ${3} | tr -d ''`
+
+if [[ ${FLG} == "Y" ]] && [[  ${3} != "GAM" && ${3} != "VESTMARK" && ${3} != "GAM_Read" ]]
+then
+        if [[ ${1} == "UBSWMA*E99" ]]
+        then
+        TGT_FILE_NME="UBSWMA%E99"
+        elif [[ ${1} == "UBSWMA*Account*Terminations" ]]
+        then
+        TGT_FILE_NME="%UBSWMA%Account_Terminations%"
+        else
+        TARGET_NME_X=$1
+        fi
+
+V_PATTERN=`echo ${1} | cut -c 1-8`
+V_PATTERN_TAX=`echo ${1} | cut -c 1-21`
+echo "V_PATTERN_TAX is $V_PATTERN_TAX"
+
+
+
+echo ${V_PATTERN}
+
+if  [[ ${V_PATTERN} ==  "UBSWMA_*"  ||  ${V_PATTERN} ==  "UBSWMA*E" || ${V_PATTERN} ==  "UBSWMA*A" ]]
+then
+                if  [[ ${V_PATTERN} ==  "UBSWMA_*" ]]
+                then
+                TGT_FILE_NME=`echo ${TARGET_NME_X} |awk -F"." '{print $1}'|sed -e 's/UBSWMA_\*\_//g'`
+                TGT_NME="AUD.TARGET_NME_X like '%${TGT_FILE_NME}%'"
+                elif [[ ${V_PATTERN} ==  "UBSWMA*E" ]]
+                then
+                TGT_NME="AUD.TARGET_NME_X like 'UBSWMA%E99%'"
+                TGT_FILE_NME="UBSWMA*E99"
+                elif [[ ${V_PATTERN} ==  "UBSWMA*A" ]]
+                then
+                TGT_NME="AUD.TARGET_NME_X like 'UBSWMA%Account%Termination%'"
+                TGT_FILE_NME="UBSWMA*Account*Terminations"
+                fi
+fi
+if [[ ${V_PATTERN} !=  "UBSWMA_*" ]] && [[ ${V_PATTERN} !=  "UBSWMA*E" ]] && [[ ${V_PATTERN} !=  "UBSWMA*A" ]] && [[ ${V_PATTERN_TAX} != "UBSWMA_PMP_Tax_Lots_D" ]] && [[ ${V_PATTERN_TAX} != "UBSWMA_PMP_Tax_Lots_F" ]]
+    then
+                TGT_FILE_NME=`echo ${TARGET_NME_X}| sed 's/_\*\_File//g'`
+                TGT_NME="AUD.TARGET_NME_X like '${TGT_FILE_NME}%'"
+fi
+
+if [[ ${V_PATTERN_TAX} == "UBSWMA_PMP_Tax_Lots_D" ]]
+then
+                echo "Into PMP"
+                TGT_FILE_NME1="UBSWMA_PMP_Tax_Delta"
+                TGT_FILE_NME="UBSWMA_PMP_Tax_Lots_Delta"
+                TGT_NME="AUD.TARGET_NME_X like '%${TGT_FILE_NME1}%'"
+elif [[ ${V_PATTERN_TAX} == "UBSWMA_PMP_Tax_Lots_F" ]]
+then
+               echo "Into PMP FULL"
+               TGT_FILE_NME1="UBSWMA_PMP_Tax_Lots"
+               TGT_FILE_NME="UBSWMA_PMP_Tax_Lots_Full"
+               TGT_NME="AUD.TARGET_NME_X like '%${TGT_FILE_NME1}%'"
+fi
+
+
+V_AUDIT_DATA=`sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL
+SET HEAD OFF;
+select distinct AUD.JOB_NME_X||'|'||AUD.TARGET_NME_X||'|'||AUD.INSERT_CNT_N||'|'||AUD.SUBJECT_AREA_CD
+from ETL_AUDIT_STATS AUD
+left outer join
+ETL_FILE_AUDIT_STATS BUD
+on (AUD.JOB_NME_X =BUD.JOB_NME_X)
+WHERE ${TGT_NME}
+AND AUD.BUSINESS_D=TO_DATE('${BUSINESS_D}', 'YYYY-MM-DD')
+AND AUD.VALID_IND_X='Y'
+AND AUD.JOB_NME_X not like '%GAM%';
+EXIT sql.sqlcode ;
+ENDOFSQL`
+
+
+echo ${V_AUDIT_DATA}
+
+V_JOB_NME_X=`echo ${V_AUDIT_DATA} | awk -F"|" '{print $1}'`
+if [[ ${V_PATTERN_TAX} == "UBSWMA_PMP_Tax_Lots_D" ]]
+then
+     V_TARGET_NME_X="UBSWMA_PMP_Tax_Lots_Delta_${BUSINESS_D}.txt"
+elif [[ ${V_PATTERN_TAX} == "UBSWMA_PMP_Tax_Lots_F" ]]
+then
+     V_TARGET_NME_X="UBSWMA_PMP_Tax_Lots_Full_${BUSINESS_D}.txt"
+else
+     V_TARGET_NME_X=`echo ${V_AUDIT_DATA} | awk -F"|" '{print $2}'|tr -d ' '`
+fi
+V_BUSINESS_D=`echo ${BUSINESS_D}`
+V_INSERT_CNT_N=`echo ${V_AUDIT_DATA} | awk -F"|" '{print $3}'|tr -d ' '`
+V_SUBJECT_AREA_CD=`echo ${V_AUDIT_DATA} | awk -F"|" '{print $4}'|tr -d ' '`
+
+echo ${V_JOB_NME_X}
+echo ${V_TARGET_NME_X}
+echo ${V_BUSINESS_D}
+echo ${V_INSERT_CNT_N}
+echo ${V_SUBJECT_AREA_CD}
+
+f_name=`echo ${1} | awk -F"." '{print $1}' | tr -d ' '`
+
+echo '${f_name}'
+
+f_name1=`sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL
+SET HEAD OFF;
+set LINESIZE 200;
+SET PAGES 0;
+set FEEDBACK OFF;
+set ECHO OFF;
+select replace ('${f_name}','UBSWMA_*_','')from dual;
+EXIT sql.sqlcode ;
+ENDOFSQL`
+
+v_f_name1=`echo ${f_name1} | tr -d ' '`
+
+
+case ${V_JOB_NME_X} in
+wkf_IAP_OUT_BOUND_TAX_LOT_FILE_WKLY)
+    v_job="JOB_NME_X not like '%TAX_LOT%'"
+    V_FILE_PATTERN="Tax_Lots_Full_${V_BUSINESS_D}"
+;;
+wkf_IAP_OUT_BOUND_USR_AUTH_FILE_WKLY)
+    v_job="JOB_NME_X not like '%USR%'"
+    V_FILE_PATTERN="UBSWMA_UserLogins_Full_${V_BUSINESS_D}"
+;;
+wkf_IAP_OUT_BOUND_USR_AUTHRSTN_FILE_WKLY)
+    v_job="JOB_NME_X not like '%USR%'"
+    V_FILE_PATTERN="UBSWMA_UserPermissions_Full_${V_BUSINESS_D}"
+;;
+wkf_IAP_OUT_BOUND_ACCT_RSTRN_FILE)
+    v_job="JOB_NME_X like 'wkf%'"
+    V_FILE_PATTERN="UBSWMA_Account_Restrictions_Full_${V_BUSINESS_D}"
+;;
+#wkf_IAP_OUT_BOUND_BLUE_SKY_FILE)
+ #   v_job="JOB_NME_X like 'wkf%'"
+  #  V_FILE_PATTERN="UBSWMA_BlueSky_${V_BUSINESS_D}"
+#;;
+#wkf_IAP_OUT_BOUND_SEC_REF_FILE)
+ #   v_job="JOB_NME_X like 'wkf%'"
+  #  V_FILE_PATTERN="UBSWMA_Security_Reference_${V_BUSINESS_D}"
+#;;
+#wkf_IAP_OUT_BOUND_SEC_RSTRN_FILE)
+ #   v_job="JOB_NME_X like 'wkf%'"
+  #  V_FILE_PATTERN="UBSWMA_Security_Restriction_Lists_${V_BUSINESS_D}"
+#;;
+*)
+
+v_job="JOB_NME_X like 'wkf%'"
+ ;;
+esac
+
+echo "value for FILE_NME_X is ${v_f_name1}"
+echo "value for JOB_NME_X is ${V_JOB_NME_X}"
+
+if [[ ${V_JOB_NME_X} == 'wkf_IAP_OUT_BOUND_TAX_LOT_FILE_WKLY' ]] || [[ ${V_JOB_NME_X} == 'wkf_IAP_OUT_BOUND_USR_AUTH_FILE_WKLY' ]] || [[ ${V_JOB_NME_X} == 'wkf_IAP_OUT_BOUND_USR_AUTHRSTN_FILE_WKLY' ]] || [[ ${V_JOB_NME_X} == 'wkf_IAP_OUT_BOUND_ACCT_RSTRN_FILE' ]]
+then
+echo " Nothing to be done"
+else
+V_RERUN_CK=`sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL
+SET HEAD OFF;
+select count(1) from ETL_FILE_AUDIT_STATS where (FILE_NME_X='%${v_f_name1}'  or JOB_NME_X='${V_JOB_NME_X}') and BUSINESS_D=TO_DATE('${BUSINESS_D}', 'YYYY-MM-DD');
+EXIT sql.sqlcode ;
+ENDOFSQL`
+
+echo "the value of V_RERUN_CK is ${V_RERUN_CK}"
+
+V_RERUN_CHECK=`echo ${V_RERUN_CK}|tr -d ' '`
+
+echo "the value of V_RERUN_CHECK is $V_RERUN_CHECK"
+
+if [[ ${V_RERUN_CHECK} -gt 0 ]]
+then
+BATCH_FILE=${TEMP_DIR}/RERUN_JOB.tmp
+rm ${BATCH_FILE}
+echo "lcd ${FTP_HOST_FROM_DIR}" >> ${BATCH_FILE}
+echo "cd ${FTP_HOST_TO_DIR}" >> ${BATCH_FILE}
+echo "mput ${VM_FILE_NM}" >> ${BATCH_FILE}
+
+sftp -b ${BATCH_FILE} ${USER}@${FTP_HOST}<<EOF
+EOF
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully ${VM_FILE_NM} File transfer to dropbox while re-running"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: ${VM_FILE_NM} File not transfer to dropbox while re-run !!! "
+    echo ""
+    failure_notification
+fi
+fi
+fi
+
+echo "v_job=${v_job}"
+
+V_FLAG=`sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL
+SET HEAD OFF;
+select distinct XREF.THR_IND||','||XREF.THR_ABRT_FLG FLG
+from (select SUBJECT_AREA_CD_X,THR_IND,THR_ABRT_FLG,FEED_FILE_NME_PATN_X||'_'||to_Char(trade_date,'YYYYMMDD')||'.txt' FIL_NM
+from ETL_VARIANCE_XREF,STG_IAP_DATEFILE where SUBJECT_AREA_CD_X='${V_SUBJECT_AREA_CD}' and THR_ABRT_FLG='Y' and
+feed_file_nme_patn_x like '%${v_f_name1}' ) XREF
+left outer join
+ETL_FILE_AUDIT_STATS AUD
+on (XREF.FIL_NM=AUD.FILE_NME_X)
+where AUD.FILE_NME_X is null
+union all
+select distinct 'Y'||','||'N' FLG
+from ETL_AUDIT_STATS AUDS inner join ETL_FILE_AUDIT_STATS FAUDS
+on (AUDS.JOB_NME_X =FAUDS.JOB_NME_X)
+where AUDS.SUBJECT_AREA_CD='${V_SUBJECT_AREA_CD}' and AUDS.BUSINESS_D=TO_DATE('${BUSINESS_D}', 'YYYY-MM-DD') and
+FAUDS.BUSINESS_D=TO_DATE('${BUSINESS_D}', 'YYYY-MM-DD') and
+AUDS.JOB_NME_X='${V_JOB_NME_X}' and
+AUDS.VALID_IND_X='Y' AND AUDS.JOB_NME_X not like '%GAM%' and AUDS.SUBJECT_AREA_CD not in
+(select SUBJECT_AREA_CD_X from ETL_VARIANCE_XREF where THR_IND='Y')
+union all
+select distinct 'X'||','||'Z' FLG
+from ETL_AUDIT_STATS
+where SUBJECT_AREA_CD='${V_SUBJECT_AREA_CD}' and BUSINESS_D=TO_DATE('${BUSINESS_D}', 'YYYY-MM-DD') and
+VALID_IND_X='Y' AND JOB_NME_X not like '%GAM%'  AND JOB_NME_X NOT like '%WKLY%' and
+target_nme_x not in('STG_IAP_SHRTHLDR','STG_IAP_PRODUCT','STG_IAP_PMSKT001_WRK','STG_IAP_PMSKT001','STG_IAP_CASH_BALANCE','STG_IAP_MONEY_FUND','STG_IAP_PMSKT001_PMP')
+and ${v_job} and SUBJECT_AREA_CD
+not in (select distinct SUBJECT_AREA_CD_X from ETL_VARIANCE_XREF where THR_ABRT_FLG != 'N' and SUBJECT_AREA_CD_X not in ('TAX','USR_AUTH','USR_AUTHZN'))
+and SUBJECT_AREA_CD !='E99';
+EXIT sql.sqlcode ;
+ENDOFSQL`
+
+echo ${V_FLAG}
+
+V_THR_IND=`echo ${V_FLAG} | awk -F"," '{print $1}'|tr -d ' '`
+V_THR_ABRT_FLG=`echo ${V_FLAG} | awk -F"," '{print $2}'|tr -d ' '`
+
+if [[ ${V_THR_ABRT_FLG} == 'Y' && ${V_THR_IND} == 'N' ]] || [[ ${V_THR_ABRT_FLG} == 'Z' && ${V_THR_IND} == 'X' ]] || [[ ${1} ==  "UBSWMA*E99" ]]
+then
+
+V_TAX_FILE=$1
+V_FILE_CNT=`ls ${TGT_FILES_DIR}/*${TGT_FILE_NME}*txt|wc -l| awk '{print $1}'`
+
+if  [[ ${V_FILE_CNT} -gt 1 ]]
+then
+     if [ ${V_TAX_FILE} == "UBSWMA_*_Tax_Lots_Delta.zip" ]
+     then
+          V_FILE_LST=`ls ${TGT_FILES_DIR}/*{UBSAP,PWS,MAC,ACCESS,SWP}*Tax_Lots_Delta*txt`
+     elif [ ${V_TAX_FILE} == "UBSWMA_PMP_Tax_Lots_Delta.zip" ]
+     then
+           V_FILE_LST=`ls ${TGT_FILES_DIR}/*PMP*Tax_Lots_Delta*txt`
+     elif [ ${V_TAX_FILE} == "UBSWMA_*_Tax_Lots_Full.zip" ]
+     then
+            V_FILE_LST=`ls ${TGT_FILES_DIR}/*{UBSAP,PWS,MAC,ACCESS,SWP}*${TGT_FILE_NME}*txt`
+     elif [ ${V_TAX_FILE} == "UBSWMA_PMP_Tax_Lots_Full.zip" ]
+     then
+              V_FILE_LST=`ls ${TGT_FILES_DIR}/*UBSWMA_PMP*Tax_Lots_Full*txt`
+     else
+
+           V_FILE_LST=`ls ${TGT_FILES_DIR}/*${TGT_FILE_NME}*txt`
+    fi
+
+for FILE_NAME_X in ${V_FILE_LST}
+do
+
+FTP_FILE_CNT_N=`wc -l ${FILE_NAME_X} | awk '{print $1-2}'`
+
+V_TARGET_NME_X=`echo ${FILE_NAME_X}| awk -F"/" '{print $7}'`
+V_INSERT_CNT_N=${FTP_FILE_CNT_N}
+
+
+insert_file_audit_stats ${V_JOB_NME_X} ${V_TARGET_NME_X} ${V_BUSINESS_D} ${V_INSERT_CNT_N} ${FLAG} ${FILE_PATTERN}
+
+done
+
+elif [[ ${1} ==  "UBSWMA*E99" ]]
+then
+insert_file_audit_stats ${V_JOB_NME_X} ${V_TARGET_NME_X} ${V_BUSINESS_D} ${V_INSERT_CNT_N} ${FLAG} ${FILE_PATTERN}
+else
+insert_file_audit_stats ${V_JOB_NME_X} ${V_TARGET_NME_X} ${V_BUSINESS_D} ${V_INSERT_CNT_N} ${FLAG} ${FILE_PATTERN}
+
+
+fi
+
+fi
+fi
+
+
+###################end of the function###################
+
+FILE_TO_SEND="$1"
+
+echo "value of file to send is $FILE_TO_SEND"
+echo "The value of VM_FILE_NM is $VM_FILE_NM"
+echo "value of V_THR_ABRT_FLG is $V_THR_ABRT_FLG"
+echo "value of V_THR_IND is $V_THR_IND"
+
+
+##if [[ ${V_THR_ABRT_FLG} == 'N' || ${V_THR_ABRT_FLG} == 'Z' ]] || [[ ${1} ==  "UBSWMA*E99" ]] || [[ ${3} ==  "GAM" ||  ${3} ==  "GAM_Read" ]] || [[ ${1} == "SWP_ACCT_DETAIL.DAT" ]]
+if [[ ${V_THR_ABRT_FLG} == 'N' || ${V_THR_ABRT_FLG} == 'Z'  ||  ${1} ==  "UBSWMA*E99"  || ${3} ==  "GAM" || ${3} ==  "VESTMARK" ||  ${3} ==  "GAM_Read"  ||  ${1} == "SWP_ACCT_DETAIL.DAT" ||  ${1} == "UBSWMA_ACCESSAM_Realized_Taxlot.zip" ]] && [[ ${FILE_TO_SEND} != "UBSWMA_*_Tax_Lots_Delta.zip" ]] && [[  ${FILE_TO_SEND} != "UBSWMA_PMP_Tax_Lots_Delta.zip" ]] && [[ ${FILE_TO_SEND} != "UBSWMA_*_Tax_Lots_Full.zip" ]]
+then
+
+BATCH_FILE=${TEMP_DIR}/DROPBOX_FILES_${V_SUBJECT_AREA_CD}.tmp
+rm ${BATCH_FILE}
+echo "lcd ${FTP_HOST_FROM_DIR}" >> ${BATCH_FILE}
+echo "cd ${FTP_HOST_TO_DIR}" >> ${BATCH_FILE}
+echo "mput ${VM_FILE_NM}" >> ${BATCH_FILE}
+
+sftp -b ${BATCH_FILE} ${USER}@${FTP_HOST}<<EOF
+EOF
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully ${VM_FILE_NM} File transfer to dropbox"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: ${VM_FILE_NM} File not transfer to dropbox !!! "
+    echo ""
+    failure_notification
+fi
+
+elif [[ ${V_THR_ABRT_FLG} == 'N' || ${V_THR_ABRT_FLG} == 'Z' ]] && [[ ${FILE_TO_SEND} == "UBSWMA_*_Tax_Lots_Full.zip" ]]
+then
+BATCH_FILE=${TEMP_DIR}/DROPBOX_FILES_FOR_TAX_FULL_${V_SUBJECT_AREA_CD}.tmp
+rm ${BATCH_FILE}
+echo "lcd ${FTP_HOST_FROM_DIR}" >> ${BATCH_FILE}
+echo "cd ${FTP_HOST_TO_DIR}" >> ${BATCH_FILE}
+echo "mput UBSWMA_ACCESS_Tax_Lots_Full_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+echo "mput UBSWMA_ACCESSAM_Tax_Lots_Full_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+echo "mput UBSWMA_MAC_Tax_Lots_Full_${BUSINESS_D}.zip"  >> ${BATCH_FILE}
+echo "mput UBSWMA_PWS_Tax_Lots_Full_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+echo "mput UBSWMA_SWP_Tax_Lots_Full_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+echo "mput UBSWMA_UBSAP_Tax_Lots_Full_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+sftp -b ${BATCH_FILE} ${USER}@${FTP_HOST}<<EOF
+EOF
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully ${VM_FILE_NM} File transfer to dropbox"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: ${VM_FILE_NM} File not transfer to dropbox !!! "
+    echo ""
+    failure_notification
+fi
+elif [[ ${V_THR_ABRT_FLG} == 'N' || ${V_THR_ABRT_FLG} == 'Z' ]] && [[ ${FILE_TO_SEND} == "UBSWMA_*_Tax_Lots_Delta.zip" ]]
+then
+BATCH_FILE=${TEMP_DIR}/DROPBOX_FILES_FOR_TAX_DELTA_${V_SUBJECT_AREA_CD}.tmp
+rm ${BATCH_FILE}
+echo "lcd ${FTP_HOST_FROM_DIR}" >> ${BATCH_FILE}
+echo "cd ${FTP_HOST_TO_DIR}" >> ${BATCH_FILE}
+echo "mput UBSWMA_ACCESS_Tax_Lots_Delta_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+echo "mput UBSWMA_ACCESSAM_Tax_Lots_Delta_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+echo "mput UBSWMA_MAC_Tax_Lots_Delta_${BUSINESS_D}.zip"  >> ${BATCH_FILE}
+echo "mput UBSWMA_PWS_Tax_Lots_Delta_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+echo "mput UBSWMA_SWP_Tax_Lots_Delta_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+echo "mput UBSWMA_UBSAP_Tax_Lots_Delta_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+sftp -b ${BATCH_FILE} ${USER}@${FTP_HOST}<<EOF
+EOF
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully ${VM_FILE_NM} File transfer to dropbox"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: ${VM_FILE_NM} File not transfer to dropbox !!! "
+    echo ""
+    failure_notification
+fi
+
+elif [[ ${V_THR_ABRT_FLG} == 'N' || ${V_THR_ABRT_FLG} == 'Z' ]] && [[ ${FILE_TO_SEND} == "UBSWMA_PMP_Tax_Lots_Delta.zip"  ]]
+then
+BATCH_FILE=${TEMP_DIR}/DROPBOX_FILES_FOR_TAX_DELTA_PMP_${V_SUBJECT_AREA_CD}.tmp
+rm ${BATCH_FILE}
+echo "lcd ${FTP_HOST_FROM_DIR}" >> ${BATCH_FILE}
+echo "cd ${FTP_HOST_TO_DIR}" >> ${BATCH_FILE}
+echo "mput UBSWMA_PMP_Tax_Lots_Delta_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+sftp -b ${BATCH_FILE} ${USER}@${FTP_HOST}<<EOF
+EOF
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully ${VM_FILE_NM} File transfer to dropbox"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: ${VM_FILE_NM} File not transfer to dropbox !!! "
+    echo ""
+    failure_notification
+fi
+
+elif [[ ${V_THR_ABRT_FLG} == 'N' || ${V_THR_ABRT_FLG} == 'Z' ]] && [[ ${FILE_TO_SEND} == "UBSWMA_PMP_Tax_Lots_Full.zip"  ]]
+then
+BATCH_FILE=${TEMP_DIR}/DROPBOX_FILES_FOR_TAX_FULL_PMP_${V_SUBJECT_AREA_CD}.tmp
+rm ${BATCH_FILE}
+echo "lcd ${FTP_HOST_FROM_DIR}" >> ${BATCH_FILE}
+echo "cd ${FTP_HOST_TO_DIR}" >> ${BATCH_FILE}
+echo "mput UBSWMA_PMP_Tax_Lots_Full_${BUSINESS_D}.zip" >> ${BATCH_FILE}
+sftp -b ${BATCH_FILE} ${USER}@${FTP_HOST}<<EOF
+EOF
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully ${VM_FILE_NM} File transfer to dropbox"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: ${VM_FILE_NM} File not transfer to dropbox !!! "
+    echo ""
+    failure_notification
+fi
+
+elif [[ ${V_THR_IND} == 'Y' && ${V_THR_ABRT_FLG} == 'Y' ]]
+then
+rm ${TEMP_DIR}/drpsqlout${V_SUBJECT_AREA_CD}.txt
+##sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL>${TEMP_DIR}/drpsqlout${V_SUBJECT_AREA_CD}.txt
+sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL >${TEMP_DIR}/drpsqlout${V_SUBJECT_AREA_CD}.txt
+SET HEAD OFF;
+select FEED_FILE_NME_PATN_X||'_'||to_Char(trade_date,'YYYYMMDD')||'.txt'
+from ETL_VARIANCE_XREF,STG_IAP_DATEFILE
+where SUBJECT_AREA_CD_X='${V_SUBJECT_AREA_CD}' and THR_ABRT_FLG='Y' and THR_IND='Y';
+ENDOFSQL
+
+FILE_NM=`cat ${TEMP_DIR}/drpsqlout${V_SUBJECT_AREA_CD}.txt`
+
+for V_FILE_NM_X in ${FILE_NM}
+do
+V_FILE_NM_1=`echo ${V_FILE_NM_X} | awk -F"." '{print $1}' | tr -d ' '`
+mv ${TGT_FILES_DIR}/${V_FILE_NM_1}* ${ARCHIVE_FILES_DIR}
+done
+
+sed -e '/^[[:blank:]]*$/d' ${TEMP_DIR}/drpsqlout${V_SUBJECT_AREA_CD}.txt > ${TEMP_DIR}/drpsqlout${V_SUBJECT_AREA_CD}_New.txt
+FILE_NM_NEW=`cat ${TEMP_DIR}/drpsqlout${V_SUBJECT_AREA_CD}_New.txt| wc -l`
+
+echo "The value of FILE_NM_NEW is $FILE_NM_NEW"
+
+BUSINESS_DATE_TAX=`sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL
+SET HEAD OFF;
+select TO_CHAR (TO_DATE($V_BUSINESS_D,'YYYYMMDD'), 'DD-MON-YY') from DUAL;
+EXIT sql.sqlcode ;
+ENDOFSQL`
+
+
+echo "Business date is $BUSINESS_DATE_TAX"
+
+##### Checking if no files breaches the threshold, then only files should go to dropbox for taxlots ####
+
+if [[ ${FILE_NM_NEW} -eq 0  && ${1} == 'UBSWMA_*_Tax_Lots_Full.zip' ]]
+then
+BATCH_FILE=${TEMP_DIR}/DROPBOX_FILES_${V_SUBJECT_AREA_CD}.tmp
+rm ${BATCH_FILE}
+echo "Taxlots full under process, all related files will be transferred" >> ${BATCH_FILE}
+echo "lcd ${FTP_HOST_FROM_DIR}" >> ${BATCH_FILE}
+echo "cd ${FTP_HOST_TO_DIR}" >> ${BATCH_FILE}
+echo "mput ${VM_FILE_NM}" >> ${BATCH_FILE}
+elif [[ ${FILE_NM_NEW} -eq 0 ]] && [[ ${1} == 'UBSWMA_UserPermissions_Full' || ${1} == 'UBSWMA_UserLogins_Full' || ${1} == 'UBSWMA_Account_Restrictions_Full'  ]]
+then
+BATCH_FILE=${TEMP_DIR}/DROPBOX_FILES_${V_SUBJECT_AREA_CD}.tmp
+rm ${BATCH_FILE}
+echo "User full or Restrictions transfer under process, all related files will be transferred" >> ${BATCH_FILE}
+echo "lcd ${FTP_HOST_FROM_DIR}" >> ${BATCH_FILE}
+echo "cd ${FTP_HOST_TO_DIR}" >> ${BATCH_FILE}
+echo "mput ${VM_FILE_NM}" >> ${BATCH_FILE}
+fi
+
+sftp -b ${BATCH_FILE} ${USER}@${FTP_HOST}<<EOF
+EOF
+
+
+
+if [[ $? -eq 0 ]]
+then
+    echo ""
+    echo "[INFO]: Sucessfully ${V_FILE_NM} File transfer to dropbox"
+    echo ""
+else
+    echo ""
+    echo "[ERROR}: ${V_FILE_NM} File not transfer to dropbox due to threshold breach !!! "
+    echo ""
+    mv ${ARCHIVE_FILES_DIR}/*${V_FILE_PATTERN}* ${TGT_FILES_DIR}
+    sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL
+    SET HEAD OFF;
+    DELETE FROM ETL_FILE_AUDIT_STATS WHERE FILE_NME_X like '%Tax%Full%' and business_d='$BUSINESS_DATE_TAX';
+    COMMIT;
+    EXIT sql.sqlcode ;
+    ENDOFSQL
+    failure_notification
+fi
+
+FILE_NM=`cat ${TEMP_DIR}/drpsqlout${V_SUBJECT_AREA_CD}_New.txt`
+
+V_CNT=0
+
+for V_FILE_NM_ABRT in ${FILE_NM}
+do
+echo $V_FILE_NM_ABRT
+if [[ -e ${ARCHIVE_FILES_DIR}/${V_FILE_NM_ABRT} ]]
+then
+V_FILE_NM_ABRT=`echo ${V_FILE_NM_ABRT} | awk -F"." '{print $1}' | tr -d ' '`
+mv  ${ARCHIVE_FILES_DIR}/${V_FILE_NM_ABRT}* ${TGT_FILES_DIR}
+V_CNT=`expr ${V_CNT} + 1`
+
+fi
+done
+
+
+if [[ ${V_CNT} -eq 0 ]]
+then
+echo "FILE COUNT IS WITHIN THRESHOLD LIMIT"
+else
+echo "FILE COUNT IS NOT WITHIN THRESHOLD LIMIT"
+echo ""
+sqlplus -s ${CONNECT_STRING}@${ORACLE_SID} <<ENDOFSQL
+SET HEAD OFF;
+DELETE FROM ETL_FILE_AUDIT_STATS WHERE FILE_NME_X like '%Tax%Full%' and business_d='$BUSINESS_DATE_TAX';
+COMMIT;
+EXIT sql.sqlcode ;
+ENDOFSQL
+failure_notification
+fi
+
+
+fi
+
+
+##########################################################################
+if [[ ${V_THR_IND} == 'N' && ${V_THR_ABRT_FLG} == 'Y' ]] || [[ ${V_THR_ABRT_FLG} == 'Z' && ${V_THR_IND} == 'X' ]] || [[ ${1} ==  "UBSWMA*E99" ]]
+then
+
+if [[ ${FLG} == "Y" ]]
+then
+if [[ ${1} ==  "UBSWMA*E99" ]]
+then
+update_etl_file_aud_st ${V_JOB_NME_X} ${V_BUSINESS_D} 4
+else
+update_etl_file_aud_st ${V_JOB_NME_X} ${V_BUSINESS_D} 4
+fi
+fi
+fi
+
+
+echo ""
+echo "***************************************************************************"
+echo "**************************  END OF THE PROCESS  ***************************"
+echo "***************************************************************************"
+echo `date`
+exit 0
+
+a301-4993-3988:/home/iapproc/load_process/Deb/Deb_new>
